@@ -6,14 +6,22 @@ use crate::{
     IsMenuItem, MenuId, MenuItemKind,
 };
 
+#[cfg(all(feature = "linux-ksni", target_os = "linux"))]
+use std::sync::Arc;
+
+#[cfg(all(feature = "linux-ksni", target_os = "linux"))]
+use arc_swap::ArcSwap;
+
 /// A menu item inside a [`Menu`] or [`Submenu`] and contains only text.
 ///
 /// [`Menu`]: crate::Menu
 /// [`Submenu`]: crate::Submenu
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct MenuItem {
     pub(crate) id: Rc<MenuId>,
     pub(crate) inner: Rc<RefCell<crate::platform_impl::MenuChild>>,
+    #[cfg(all(feature = "linux-ksni", target_os = "linux"))]
+    pub(crate) compat: Arc<ArcSwap<crate::CompatMenuItem>>,
 }
 
 impl IsMenuItemBase for MenuItem {}
@@ -32,20 +40,40 @@ impl IsMenuItem for MenuItem {
 }
 
 impl MenuItem {
+    #[cfg(all(feature = "linux-ksni", target_os = "linux"))]
+    pub(crate) fn compat_menu_item(
+        item: &crate::platform_impl::MenuChild,
+    ) -> crate::CompatMenuItem {
+        crate::CompatStandardItem {
+            id: item.id().0.clone(),
+            label: super::strip_mnemonic(item.text()),
+            enabled: item.is_enabled(),
+            icon: None,
+            predefined_menu_item_kind: None,
+        }
+        .into()
+    }
+
     /// Create a new menu item.
     ///
     /// - `text` could optionally contain an `&` before a character to assign this character as the mnemonic
     ///   for this menu item. To display a `&` without assigning a mnemenonic, use `&&`.
     pub fn new<S: AsRef<str>>(text: S, enabled: bool, accelerator: Option<Accelerator>) -> Self {
-        let item = crate::platform_impl::MenuChild::new(
+        let inner = crate::platform_impl::MenuChild::new(
             text.as_ref(),
             enabled,
             accelerator.map(KeyAccelerator::from),
             None,
         );
+
+        #[cfg(all(feature = "linux-ksni", target_os = "linux"))]
+        let compat = Self::compat_menu_item(&inner);
+
         Self {
-            id: Rc::new(item.id().clone()),
-            inner: Rc::new(RefCell::new(item)),
+            id: Rc::new(inner.id().clone()),
+            inner: Rc::new(RefCell::new(inner)),
+            #[cfg(all(feature = "linux-ksni", target_os = "linux"))]
+            compat: Arc::new(ArcSwap::from_pointee(compat)),
         }
     }
 
@@ -60,14 +88,21 @@ impl MenuItem {
         accelerator: Option<Accelerator>,
     ) -> Self {
         let id = id.into();
+        let inner = crate::platform_impl::MenuChild::new(
+            text.as_ref(),
+            enabled,
+            accelerator.map(KeyAccelerator::from),
+            Some(id.clone()),
+        );
+
+        #[cfg(all(feature = "linux-ksni", target_os = "linux"))]
+        let compat = Self::compat_menu_item(&inner);
+
         Self {
-            id: Rc::new(id.clone()),
-            inner: Rc::new(RefCell::new(crate::platform_impl::MenuChild::new(
-                text.as_ref(),
-                enabled,
-                accelerator.map(KeyAccelerator::from),
-                Some(id),
-            ))),
+            id: Rc::new(id),
+            inner: Rc::new(RefCell::new(inner)),
+            #[cfg(all(feature = "linux-ksni", target_os = "linux"))]
+            compat: Arc::new(ArcSwap::from_pointee(compat)),
         }
     }
 
@@ -85,7 +120,14 @@ impl MenuItem {
     /// an `&` before a character to assign this character as the mnemonic
     /// for this menu item. To display a `&` without assigning a mnemenonic, use `&&`.
     pub fn set_text<S: AsRef<str>>(&self, text: S) {
-        self.inner.borrow_mut().set_text(text.as_ref())
+        let mut inner = self.inner.borrow_mut();
+        inner.set_text(text.as_ref());
+
+        #[cfg(all(feature = "linux-ksni", target_os = "linux"))]
+        self.compat.store(Arc::new(Self::compat_menu_item(&inner)));
+
+        #[cfg(all(feature = "linux-ksni", target_os = "linux"))]
+        crate::send_menu_update();
     }
 
     /// Get whether this menu item is enabled or not.
@@ -95,7 +137,14 @@ impl MenuItem {
 
     /// Enable or disable this menu item.
     pub fn set_enabled(&self, enabled: bool) {
-        self.inner.borrow_mut().set_enabled(enabled)
+        let mut inner = self.inner.borrow_mut();
+        inner.set_enabled(enabled);
+
+        #[cfg(all(feature = "linux-ksni", target_os = "linux"))]
+        self.compat.store(Arc::new(Self::compat_menu_item(&inner)));
+
+        #[cfg(all(feature = "linux-ksni", target_os = "linux"))]
+        crate::send_menu_update();
     }
 
     /// Set this menu item accelerator.
